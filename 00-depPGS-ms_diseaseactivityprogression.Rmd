@@ -1,0 +1,1695 @@
+---
+title: "Depression polygenicity and MS disease activity & progression"
+author: "Ali Manouchehrinia and Kaarina Kowalec"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: yes
+    number_sections: yes
+  toc: true
+  toc_float: true
+  toc_collapsed: true
+  toc_depth: 3
+  number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Related to manuscript on the association between depression polygenicity and 
+# MS disease activity and progression in multiple cohorts.
+```{r, include=FALSE}
+
+# Clearing the environment and loading packages
+
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(kableExtra)
+library(arsenal)
+library(jtools)
+library(bestNormalize)
+library(ggridges)
+library(ggpubr)
+library(ms.sev)
+library(lme4)
+library(interactions)
+library(ggsurvfit)
+library(survival)
+library(survminer)
+library(stringr)
+library(patchwork)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(meta)
+library(gtsummary)
+library(clubSandwich)
+library(ggplot2)
+
+options(scipen = 9999, digits = 4)
+
+setDTthreads(0)
+
+
+```
+
+
+#### Data Path
+```{r}
+# insert paths here
+
+```
+
+
+## Data prepration for Analysis (Outcome and exposures)
+### Data prepration (Canada, USA)
+```{r, error=T, message=FALSE, warning=FALSE, comment="", results='asis', fig.align='center', dpi=600, fig.asp=0.8, fig.height=20, fig.width=12}
+
+rm(list = ls())
+######################################################################
+############## Canada ################################################
+######################################################################
+
+### Loading clinical and additional data
+load(paste0(Canada_path, "00-imid-dod-aim2-14dec23.rdat"))
+
+### Cleaning BMI data
+dt_bmi_canada <- select(ms_perind, id = demo_studyid, BMI) 
+
+### Preparing depression phenotypes
+dt_dep <- ms_perind %>% 
+  select(id = demo_studyid, demo_depression, scid_ever_dep, phq_above10) %>% 
+  mutate(demo_depression = as.factor(ifelse(demo_depression == 1, "Yes", "No"))) %>% 
+  mutate(scid_ever_dep = as.factor(ifelse(scid_ever_dep == 1, "Yes", "No"))) %>% 
+  mutate(phq_above10 = as.factor(ifelse(phq_above10 == 1, "Yes", "No")))
+
+### Preparing baseline data
+dt_base <- ms_long %>% select(id = demo_studyid, matches("onset|gender|age|date|smoke"))  %>%
+  merge(. , dt_bmi_canada, by = "id", all.x = T, all.y = F) %>%   
+  group_by(id) %>%
+  arrange(id, ms_edss_date) %>%
+  fill(ms_course_onset, .direction = "updown") %>%
+  rename(year_onset = demo_yearonset, 
+         sex = demo_gender, 
+         smoking = demo_smoker,
+         phenotype = ms_course_onset) %>%
+  select(id, sex, age, ageonset, agediagnosis,  year_onset, phenotype, ms_edss_date, smoking, BMI) %>%
+  mutate(smoking = ifelse(smoking ==1 , "Ever", "Never")) %>% 
+  mutate(phenotype = ifelse(phenotype == 1, "CIS", 
+                     ifelse(phenotype == 2, "RRMS",
+                     ifelse(phenotype == 3, "SPMS",
+                     ifelse(phenotype == 4, "PPMS", 
+                     ifelse(phenotype == 5, "PRMS", "Unknown"))))), # 1, CIS | 2, RRMS | 3, SPMS | 4, PPMS | 5, PRMS | 6, unknown
+         sex = as.factor(ifelse(sex == 1, "Female", "Male" ))) %>% 
+  mutate(seq = 1:length(id), max = n()) %>%
+  mutate(age_baseline = ifelse(seq == 1, age, NA)) %>% 
+  fill(age_baseline, .direction = "updown") %>% 
+  mutate(time_days = ms_edss_date - lag(ms_edss_date)) %>%
+  mutate(time_days = ifelse(seq == 1, 0, time_days)) %>%
+  mutate(time_days = cumsum(time_days)) %>%
+  mutate(total_years_follow_up = round(max(time_days, na.rm = T)/365.25, 0) ) %>%
+  ungroup() %>% 
+  filter(!duplicated(id)) %>% select(-seq, -max , -time_days, -ms_edss_date, -age) %>% 
+  merge(. , dt_dep)
+
+summary(tableby(~., dt_base %>% filter(!duplicated(id)) %>% select(-id)), digits = 2)
+
+########### Calculating annualised relapse rate (ARR) and organizing #####
+########### the relapse information ############
+################################################
+
+dt_relapse <- ms_long %>% select(id = demo_studyid, matches("relapse|date"))  %>%
+  group_by(id) %>%
+  arrange(id, ms_edss_date) %>%
+  mutate(seq = 1:length(id), max = n()) %>%
+  mutate(time_days = ms_edss_date - lag(ms_edss_date)) %>%
+  mutate(time_days = ifelse(seq == 1, 0, time_days)) %>%
+  mutate(time_days = cumsum(time_days)) %>%
+  mutate(time_years = round(time_days/365.25, 0)) %>%
+  mutate(total_n_relapse = max(cumsum(ms_relapse_no))) %>%
+  mutate(total_years_follow_up = round(max(time_days)/365.25, 2) ) %>%
+  mutate(ARR = total_n_relapse / total_years_follow_up ) %>%
+  filter(!duplicated(id)) %>%
+  mutate(ever_relapse = (ifelse(ARR > 0, 1 , 0 ))) %>%
+  ungroup() %>% select(id, ARR, ever_relapse, total_n_relapse)
+
+##### Average Annualized Relapse Rate
+kable(dt_relapse %>% summarise(n = n(), mean_ARR = mean(ARR, na.rm= T)) ) %>%
+  kable_styling()
+
+##### ARR by ARR categories (>0 , 0)
+kable(dt_relapse %>% group_by(ever_relapse)%>% summarise(n = n(), mean_ARR = mean(ARR, na.rm= T))) %>%
+  kable_styling()
+
+################ MS drug/DMT information ###############
+################################################
+# 1, Avonex | 2, Betaseron | 3, Rebif 22 mcg | 4, Rebif 44 mcg | 5, Copaxone | 6, Gilenya | 7, Tysabri | 8, Tecfidera | 9, Aubagio | 10, Lemtrada | 11, Azathioprine | 12, Cyclophosphamide | 13, Other | 14, None | 15, Rituximab | 16, Ocrelizumab | 17, Cladribine | 18, Peginterferon beta-1a | 19, Daclizumab
+
+dmt_key <- data.frame(id = 1:19, 
+                      dmt_name = c("Avonex", "Betaseron", "Rebif 22 mcg" , "Rebif 44 mcg", "Copaxone", "Gilenya", "Tysabri",
+                                          "Tecfidera", "Aubagio", "Lemtrada", "Azathioprine", "Cyclophosphamide", "Other", "None",
+                                          "Rituximab", "Ocrelizumab", "Cladribine", "Peginterferon beta-1a", "Daclizumab"),
+                      dmt_class = c("Platform" , "Platform" ,"Platform" ,"Platform" ,"Platform" ,"Oral", "Monoclonal", 
+                                    "Oral", "Oral", "Monoclonal", "Other", "Other", "Other", "Untreated", "Monoclonal", "Monoclonal", "Oral",
+                                    "Platform", "Monoclonal"))
+
+dt_dmt <- ms_long %>% select(id = demo_studyid, ms_edss_date, matches("dmt"))  %>%
+  select(-matches("sdmt")) %>% 
+  pivot_longer(., names_to = "dmt_name", values_to = "ever", cols = c(ms_dmt___1:ms_dmt___18)) %>% 
+  group_by(id, ms_edss_date) %>% 
+  filter(ever != 0) %>% 
+  mutate(dmt = str_extract(dmt_name, pattern = "([0-9]+)")) %>% 
+  select(-dmt_name) %>% 
+  merge(. , dmt_key, by.x = "dmt", by.y = "id") %>% 
+  group_by(id) %>% 
+  arrange(id, ms_edss_date) %>% 
+  mutate(ever_treated = ifelse(dmt_class == "Untreated", "No" , "Yes"),
+         ever_treated = max(ever_treated)) %>% 
+  fill(ever_treated, .direction = "updown") %>% 
+  mutate(ever_treated_platform = ifelse(dmt_class != "Platform", "No" , "Yes"),
+         ever_treated_platform = max(ever_treated_platform)) %>% 
+  fill(ever_treated_platform, .direction = "updown") %>% 
+  mutate(ever_treated_oral = ifelse(dmt_class != "Oral", "No" , "Yes"),
+         ever_treated_oral = max(ever_treated_oral)) %>% 
+  fill(ever_treated_oral, .direction = "updown") %>%
+  mutate(ever_treated_mono = ifelse(dmt_class != "Monoclonal", "No" , "Yes"),
+         ever_treated_mono = max(ever_treated_mono)) %>% 
+  fill(ever_treated_mono, .direction = "updown")
+
+dt_dmt_short <- dt_dmt %>%  filter(!duplicated(id)) %>% select(-dmt, -ms_edss_date:-dmt_class) 
+
+################ Final dataset #################
+################################################
+dt <- merge(dt_base, dt_relapse, by = "id", all.x = T, all.y = F)
+dt <- merge(dt, dt_dmt_short, by = "id", all.x = T, all.y = F) 
+
+
+#------ Assuming missing DMT and relapse data as "none"
+dt <- dt %>% 
+  mutate_at(c('ARR','ever_relapse', "total_n_relapse"), ~replace_na(.,0)) %>% 
+  mutate_at(c('ever_treated','ever_treated_platform', "ever_treated_oral", "ever_treated_mono"), ~replace_na(.,"No")) %>% 
+  mutate(ever_relapse = as.factor(ifelse(ever_relapse == 1, "Yes", "No"))) 
+
+
+summary(tableby(~., dt %>% filter(!duplicated(id)) %>% select(-id, -matches("PC|z.mdd|out"))), digits = 2)
+
+fwrite(dt , paste0(Gen_data_path, "Canadian_data.txt", col.names = T))
+
+######################################################################
+############## USA.   ################################################
+######################################################################
+##########################################################
+########### Preparing the baseline information ###########
+##########################################################
+rm(list = ls())
+
+dt_base <- haven::read_sas(paste0(USA_path, "kaarina_combi.sas7bdat"), NULL) %>%
+  filter(!is.na(visit)) %>% 
+  rename(id = Specimen_ID) %>%
+  select(id, 
+         arm = treat,
+         base_visit_date = F01DTVIS, 
+         sex = Gen, 
+         BMI = BMI_b,
+         smoking = sm_hx ,
+         age_baseline = age_b,
+         year_onset = symp,
+         y_dig = diag,
+         baseline_edss = EDSS_M0,
+         total_follow_up_month = fu_months,
+         time_pde_npde_days = All_PDE_NPDE_Time_days, ## time in days to relapse or censoring 
+         event_pde_npde = PDE_NPDE_Censor_0) %>% 
+  mutate(sex = ifelse(sex == "M", "Male", ifelse( sex == "F", "Female", NA))) %>% 
+  mutate(phenotype = "RRMS") %>% 
+  mutate(total_years_follow_up = total_follow_up_month/12) %>% 
+  mutate(agediagnosis = y_dig - (lubridate::year(base_visit_date) - age_baseline)  ) %>% 
+  mutate(ageonset = agediagnosis - (y_dig - year_onset)) %>% 
+  mutate(ever_treated = "Yes", ever_treated_platform = "Yes", ever_treated_oral = "No", ever_treated_mono = "No") %>% 
+  select(id, sex, ageonset, agediagnosis, year_onset, phenotype, age_baseline, total_years_follow_up, matches("ever_treat"), time_pde_npde_days, smoking, BMI) %>% 
+  filter(!duplicated(id))
+
+#### depression status
+load (paste0(USA_path, "01-combi-dod-aim2-gx-30jan23.rdat"))
+d <- select(d, id = Specimen_ID , depression = status_dp) %>% mutate(depression = as.factor(ifelse(depression == 1, "Yes", "No")))
+
+dt_base <- merge(dt_base, d, by = "id", all.x = T, all.y = F)
+
+################ DT relapse
+dt_rel <- haven::read_sas(paste0(USA_path,"kaarina_relapse.sas7bdat"), NULL) %>%
+  rename(id = Specimen_ID) %>% #filter(id %in% c(unique(dt_grs $id))) %>% 
+  select(id, 
+         rel_time = event_time,
+         type_of_relapse = relapse_of_relapse) %>% 
+  filter(!is.na(rel_time)) %>% 
+  group_by(id) %>% 
+  mutate(total_n_relapse = ifelse(type_of_relapse %in% c("pde") , 1, 0) ) %>% ## based on PDE only 
+  mutate(total_n_relapse = sum(total_n_relapse, na.rm = 0)) %>% 
+  arrange(id, rel_time) %>% 
+  mutate(seq= seq(1:length(id))) %>% 
+  mutate(time_to_first_relapse = min(rel_time)) %>% 
+  mutate(type_of_first_relapse = ifelse(seq == 1, type_of_relapse, NA)) %>% 
+  fill(type_of_first_relapse, .direction = "updown") %>% 
+  mutate(ever_npde = ifelse(type_of_relapse == "npde", 1, 0)) %>% 
+  mutate(ever_pde = ifelse(type_of_relapse == "pde", 1, 0)) %>% 
+  mutate(ever_se = ifelse(type_of_relapse == "se", 1, 0)) %>% 
+  mutate(time_to_first_npde = ifelse(type_of_relapse == "npde", (rel_time), NA)) %>% 
+  mutate(time_to_first_pde = ifelse(type_of_relapse == "pde", (rel_time), NA)) %>% 
+  mutate(time_to_first_se = ifelse(type_of_relapse == "se", (rel_time), NA)) %>% 
+  mutate(time_to_first_npde = min(time_to_first_npde, na.rm = T )) %>% 
+  mutate(time_to_first_pde =  min(time_to_first_pde, na.rm = T )) %>% 
+  mutate(time_to_first_se = min(time_to_first_se, na.rm = T )) %>% 
+  mutate(time_to_first_npde = ifelse(is.infinite(time_to_first_npde), NA, time_to_first_npde)) %>% 
+  mutate(time_to_first_pde = ifelse(is.infinite(time_to_first_pde), NA, time_to_first_pde)) %>%  
+  mutate(time_to_first_se = ifelse(is.infinite(time_to_first_se), NA, time_to_first_se)) %>% 
+  filter(!duplicated(id)) %>% 
+  select(-seq, -rel_time, -type_of_relapse) 
+
+dt_usa <- merge(dt_base, dt_rel, by = "id", all.x = T, all.y = F) %>% 
+  mutate(total_n_relapse = ifelse(is.na(total_n_relapse), 0, total_n_relapse)) %>% 
+  group_by(id) %>% 
+  mutate(ARR = total_n_relapse / (total_years_follow_up )) %>% ungroup()
+
+summary(dt_usa$ARR)
+
+dt_usa <- dt_usa %>% 
+  mutate(ever_relapse = as.factor(ifelse(total_n_relapse > 0 , "Yes", "No")),
+         time_to_first_relapse = ifelse(is.na(time_to_first_relapse), time_pde_npde_days, time_to_first_relapse),
+         type_of_first_relapse = ifelse(is.na(type_of_first_relapse), "No relapse", type_of_first_relapse),
+         time_to_first_npde = ifelse(is.na(time_to_first_npde), time_pde_npde_days , time_to_first_npde),
+         time_to_first_pde = ifelse(is.na(time_to_first_pde), time_pde_npde_days, time_to_first_pde),
+         time_to_first_se = ifelse(is.na(time_to_first_se), time_pde_npde_days, time_to_first_se)) %>% 
+  mutate(ever_npde = coalesce(ever_npde, 0),
+         ever_pde = coalesce(ever_pde, 0),
+         ever_se = coalesce(ever_se, 0))
+
+
+fwrite(dt_usa , paste0(Gen_data_path, "Drived data/USA_data.txt"), col.names = T)
+
+
+```
+
+### Swedish data
+```{r ,  error=T, message=FALSE, warning=FALSE, comment="", results='asis', fig.align='center', dpi=600, fig.asp=0.8, fig.height=20, fig.width=12}
+
+rm(list = ls())
+
+### We filtered the study population to those with less than a one year gap between the onset and diagnosis
+### We followed them for 5 years
+### Having onset date after 1st of January 2001
+
+base <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "base") %>% 
+  select(BCID, sex, type, date_birth, date_onset, date_dig, date_sp) %>% 
+  mutate(phenotype = str_sub(type, 1,2)) %>% 
+  mutate(phenotype = ifelse(phenotype == "RR", "RRMS", 
+                            ifelse(phenotype == "SP", "SPMS", 
+                                   ifelse(phenotype == "PR", "PRMS", ifelse(phenotype == "PP", "PPMS", NA))))) %>% 
+  mutate(ageonset = as.numeric(round((as.Date(date_onset)- as.Date(date_birth))/365.2, 2 ))) %>% 
+  mutate(agediagnosis = as.numeric(round((as.Date(date_dig)- as.Date(date_birth))/365.2, 2 ))) %>% 
+  mutate(sex = ifelse(sex == "Man", "Male", "Female")) %>% 
+  mutate(year_onset = lubridate::year(as.Date(date_onset))) %>% 
+  mutate(age_baseline = ageonset) %>% 
+  filter(as.Date(date_dig)- as.Date(date_onset) <= 365.2) %>% 
+  select(BCID, sex, phenotype, ageonset, agediagnosis, year_onset, date_onset, age_baseline, date_sp)
+  
+relapse <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "Relapse") %>% 
+  mutate(date_relapse = as.Date(date_relapse)) %>% 
+  select(BCID, date_relapse) 
+
+end_date <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "EDSS") %>% 
+  select(BCID , end_date =  date_edss) 
+end_date_2 <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "SDMT") %>% 
+  select(BCID , end_date = date_sdmt)
+end_date_3 <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "DMT") %>% 
+  select(BCID , end_date = stop_date) %>% mutate(end_date = as.Date(end_date))
+
+end_date <- rbind(end_date, end_date_2, end_date_3) %>% 
+  group_by(BCID) %>% 
+  arrange(BCID, end_date) %>% 
+  mutate(end_date_final = max(as.Date(end_date), na.rm = T)) %>% 
+  mutate(end_date_final = if_else(end_date_final == -Inf , as.Date(NA), end_date_final)) %>% 
+  filter(!duplicated(BCID)) %>% select(BCID, end_date_final)
+
+ main_df <- base %>% 
+  select(BCID, date_onset) %>% 
+  mutate(date_onset = as.Date(date_onset)) %>% 
+  merge(. , end_date, all.x = T, all.y = F, by = "BCID") %>% 
+  mutate(follow_up_end = abs(round(as.numeric((as.Date(date_onset)- as.Date(end_date_final)))/365.2, 2  ))) %>% 
+  filter(follow_up_end >= 1 ) %>% 
+  mutate(follow_up_end = ifelse(follow_up_end >= 5, 5, follow_up_end)) %>% 
+  mutate(time_start = 0, time_end = ceiling(follow_up_end), event = 1) 
+
+main_df <- survSplit( data = main_df, 
+           start = "time_start", end = "time_end",
+           cut = 1:5,
+           id = "id",
+           event = "event")
+
+main_df <- main_df %>% 
+  group_by(BCID) %>% 
+  mutate( year = (time_start) + lubridate::year(date_onset)) %>% 
+  select(BCID, year, date_onset, end_date_final)
+
+main_df <- main_df %>% 
+  group_by(BCID) %>% 
+  arrange(BCID, year) %>% 
+  mutate(seq = seq(1:length(BCID)), max = n()) %>% 
+  mutate(start_period = if_else(seq == 1, date_onset + 10 , ( (date_onset+1) +((seq-1)*365.25)) )) %>% 
+  mutate(end_period = date_onset+((seq)*365.25)) %>% 
+  select(BCID, start_period, end_period, date_onset, end_date_final, seq)  %>%  
+  filter(date_onset > "2001-01-01") %>% ## Filtering to contemporary cohorts
+  mutate(test = as.numeric((as.Date(end_date_final)- as.Date(date_onset)))/365.2) %>% 
+  mutate(test_2 = ifelse(seq > test, "after", "before")) %>% 
+  filter(test_2 == "before") %>% select(-end_date_final, -test, -test_2)
+
+main_df <- merge(main_df, relapse %>% filter(BCID %in% c(unique(main_df$BCID))), all = T) %>% 
+  mutate(relapse = ifelse(date_relapse %within% interval(start_period, end_period),  1, 0)) %>% 
+  arrange(BCID, start_period) %>% 
+  mutate(relapse = ifelse(is.na(relapse), 0 , relapse)) %>% 
+  group_by(BCID, start_period) %>% 
+  mutate(relapse = sum(relapse)) %>% 
+  group_by(BCID) %>% 
+  filter(!duplicated(start_period)) %>% 
+  select(-date_relapse) %>% 
+  merge(. , base) %>% 
+  group_by(BCID) %>% 
+  mutate(total_n_relapse = max(cumsum(relapse))) %>%
+  mutate(total_years_follow_up = max(seq)) %>%
+  mutate(ARR = total_n_relapse / total_years_follow_up ) %>% 
+  mutate(ever_relapse = (ifelse(ARR > 0, "Yes" , "No" ))) %>%
+  ungroup() 
+
+##### Average Annualized Relapse Rate
+kable(main_df %>% filter(!duplicated(BCID)) %>% summarise(n = n(), mean_ARR = mean(ARR, na.rm= T)) ) %>%
+  kable_styling()
+
+dmt <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "DMT") %>% 
+  select(BCID, dmt.category, start_date, stop_date) %>% 
+  mutate(start_date = as.Date(start_date), stop_date = as.Date(stop_date))
+
+main_df <- main_df %>% 
+  merge(. , dmt %>% filter(BCID %in% c(unique(main_df$BCID))), all = T) %>% 
+  mutate(DMT = ifelse(start_date %within% interval(start_period, end_period),  dmt.category, "No Treatment")) %>% 
+  arrange(BCID, start_period) %>% 
+  mutate(DMT = ifelse(is.na(DMT), "No Treatment" , DMT)) %>% 
+  group_by(BCID) %>% 
+  mutate(ever_treated = ifelse(DMT %in% c("Monoclonal antibodies" , "Orals" , "Platform", "HSCT"), "Yes", "No")) %>% 
+  mutate(ever_treated = max(ever_treated, na.rm = T)) %>% 
+  mutate(ever_treated_platform = ifelse(DMT == "Platform", "Yes", "No")) %>% 
+  mutate(ever_treated_platform = max(ever_treated_platform, na.rm = T)) %>% 
+  mutate(ever_treated_oral = ifelse(DMT  == "Orals", "Yes", "No")) %>% 
+  mutate(ever_treated_oral = max(ever_treated_oral, na.rm = T)) %>% 
+  mutate(ever_HSCT = ifelse(DMT  == "HSCT", "Yes", "No")) %>% 
+  mutate(ever_HSCT = max(ever_HSCT, na.rm = T)) %>% 
+  mutate(ever_treated_mono = ifelse(DMT  == "Monoclonal antibodies", "Yes", "No")) %>% 
+  mutate(ever_treated_mono = max(ever_treated_mono, na.rm = T)) %>% 
+  mutate(mix_treated = ifelse(ever_treated_platform == "Yes" & ever_treated_oral == "Yes" , "Yes",
+                       ifelse(ever_treated_platform == "Yes" & ever_HSCT == "Yes" , "Yes",
+                       ifelse(ever_treated_platform == "Yes" & ever_treated_mono == "Yes", "Yes", "No")))) %>% 
+  mutate(mix_treated = max(mix_treated, na.rm = T)) %>% 
+  group_by(BCID) %>% 
+  filter(!duplicated(start_period)) %>% 
+  select(-start_date, -stop_date, -dmt.category, -DMT) 
+
+bmi <- fread(paste0(Sweden_env_path, "bmi.csv")) %>% 
+  filter(w != 999, w > 20, w < 200) %>% 
+  mutate(h = ifelse(h < 1, h + 1, h)) %>% 
+  mutate(bmi = w / (h^2) ) %>% 
+  select(BCID, BMI= bmi, q_date)
+
+smk <- fread(paste0(Sweden_env_path, "smoking.csv")) %>% 
+  select(BCID, smoking = D_SMKREG_CIG_LIF_STAT) %>% 
+  mutate(smoking = ifelse(smoking == 1, "Ever", "Never"))
+
+env <- merge(smk, bmi, all = T) %>% filter(!duplicated(BCID))
+
+main_df <- merge(main_df, env %>% filter(BCID %in% c(unique(main_df$BCID))), all.x = T, all.y = F) %>% 
+  filter(!duplicated(BCID)) %>% 
+  mutate(phenotype = ifelse(phenotype == "SPMS" & as.Date(date_sp) > end_period , "RRMS", phenotype )) %>% 
+  filter(phenotype %in% c("RRMS", "PRMS"))
+
+table(main_df$phenotype)
+  
+fwrite(main_df , paste0(Sweden_gen_data_path, "Sweden_data.txt"), col.names = T)
+
+```
+
+### Adding PGS to the data  
+```{r, error=T, message=FALSE, warning=FALSE, comment="", results='asis', fig.align='center', dpi=600, fig.asp=0.8, fig.height=20, fig.width=12}
+
+rm(list = ls())
+gc()
+
+####################################################
+############## Sweden ##############################
+####################################################
+####################################################
+key <- fread("conversion.txt", col.names = c("FID", "IID", "BCID", "ID"))
+
+files <- sort(list.files(paste0(plink_path), pattern = "gsa|clump"))
+
+tempdf <- data.frame(fread(paste0(plink_path,files[1])) %>% select(id = IID))
+for (i in files) {
+  dt <- fread(paste0(plink_path,i))
+  dt <- select(dt, id = IID, SCORESUM) 
+  dt[[str_remove_all(i, "gsa_|lupmed|.profile")]] <- dt $ SCORESUM 
+  dt $SCORESUM <- NULL
+  tempdf <- merge(tempdf, dt)
+  rm(dt, i)
+}
+new_grs_gsa_PLINK_clumped_2023 <- tempdf 
+rm(files, tempdf)
+
+files <- sort(list.files(paste0(plink_path), pattern = "omni|clump"))
+tempdf <- data.frame(fread(paste0(plink_path,files[1])) %>% select(id = IID))
+for (i in files) {
+  dt <- fread(paste0(plink_path,i))
+  dt <- select(dt, id = IID, SCORESUM) 
+  dt[[str_remove_all(i, "omni_|lupmed|.profile")]] <- dt $ SCORESUM 
+  dt $SCORESUM <- NULL
+  tempdf <- merge(tempdf, dt)
+  rm(dt, i)
+}
+new_grs_decode_PLINK_clumped_2023 <- tempdf 
+rm(files, tempdf)
+
+
+### Human Omni
+new_grs_decode_SbayseR <- fread(paste0(Sweden_gen_data_path, "final.SWE_deCode_2023_no_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_no_MHC = SCORESUM)
+
+new_grs_decode_SbayseR_mhc <- fread(paste0(Sweden_gen_data_path, "final.SWE_deCode_2023_with_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_with_MHC = SCORESUM)
+
+new_grs_decode_SbayseR_banded <- fread(paste0(Sweden_gen_data_path, "final.SWE_deCode_2023_banded.score.profile")) %>% 
+  select(id = IID, SbayseR_banded = SCORESUM)
+
+### GSA
+new_grs_gsa_SbayseR <- fread(paste0(Sweden_gen_data_path, "final.SWE_gsa_2023_no_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_no_MHC = SCORESUM)
+
+new_grs_gsa_SbayseR_mhc <- fread(paste0(Sweden_gen_data_path, "final.SWE_gsa_2023_with_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_with_MHC = SCORESUM)
+
+new_grs_gsa_SbayseR_banded <- fread(paste0(Sweden_gen_data_path, "final.SWE_gsa_2023_banded.score.profile")) %>% 
+  select(id = IID, SbayseR_banded = SCORESUM)
+
+
+pc <- fread(paste0(Sweden_gen_data_path, "swedish_pcs_depression.txt")) %>% 
+  select(BCID = IID, PC1:PC5)
+
+
+dt_grs_gsa <- pc %>% 
+  merge(. , new_grs_gsa_SbayseR, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_gsa_SbayseR_mhc, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_gsa_SbayseR_banded, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_gsa_PLINK_clumped_2023, by.x =  "BCID", by.y = "id") %>% 
+  mutate(Group = "Sweden_GSA", id = BCID) %>% na.omit(.) %>% filter(!duplicated(BCID)) %>% select(-BCID)
+
+dt_grs_omni <- pc %>% 
+  merge(. , new_grs_decode_SbayseR, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_decode_SbayseR_mhc, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_decode_SbayseR_banded, by.x =  "BCID", by.y = "id") %>% 
+  merge(. , new_grs_decode_PLINK_clumped_2023, by.x =  "BCID", by.y = "id") %>% 
+  mutate(Group = "Sweden_Omni" , id = BCID) %>% na.omit(.) %>% filter(!duplicated(BCID)) %>% select(-BCID)
+
+####################################################
+############## Canada ##############################
+####################################################
+
+files <- sort(list.files(paste0(plink_path), pattern = "imid|clump"))
+tempdf <- data.frame(fread(paste0(plink_path,files[1])) %>% select(id = IID))
+for (i in files) {
+  dt <- fread(paste0(plink_path,i))
+  dt <- select(dt, id = IID, SCORESUM) 
+  dt[[str_remove_all(i, "imid_|lupmed|.profile")]] <- dt $ SCORESUM 
+  dt $SCORESUM <- NULL
+  tempdf <- merge(tempdf, dt)
+  rm(dt, i)
+}
+new_grs_imid_PLINK_clumped_2023 <- tempdf %>% mutate(id = as.numeric(str_extract(id, "\\d+$")))
+rm(files, tempdf)
+
+new_grs_can_SbayseR <- fread(paste0(Canada_USA_SBayseR_path, "final.Canada_2023_no_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_no_MHC = SCORESUM) %>% 
+  mutate(id = as.numeric(str_extract(id, "\\d+$"))) 
+
+new_grs_can_SbayseR_MHC <- fread(paste0(Canada_USA_SBayseR_path, "final.Canada_2023_with_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_with_MHC = SCORESUM) %>% 
+  mutate(id = as.numeric(str_extract(id, "\\d+$"))) 
+
+new_grs_can_SbayseR_banded <- fread(paste0(Canada_USA_SBayseR_path, "final.Canada_2023_banded.score.profile")) %>% 
+  select(id = IID, SbayseR_banded = SCORESUM) %>% 
+  mutate(id = as.numeric(str_extract(id, "\\d+$"))) 
+
+load(paste0(Canada_path, "00-imid-dod-aim2-3nov22.rdat"))
+pc <- ms_perind %>% select(id = demo_studyid, matches("z_mdd"), PC1_3sd:PC5_3sd) %>% na.omit()
+
+pc <- pc %>% ungroup() %>% mutate_if(is.matrix, as.numeric)
+
+dt_grs_canada <- pc %>% ungroup() %>% 
+  merge(. , new_grs_can_SbayseR, by = "id") %>% 
+  merge(. , new_grs_can_SbayseR_MHC, by = "id") %>% 
+  merge(. , new_grs_can_SbayseR_banded, by = "id") %>% 
+  merge(., new_grs_imid_PLINK_clumped_2023, by = "id") %>% 
+  mutate(Group = "Canada") %>% mutate(id = as.character(id)) 
+
+####################################################
+############## USA.   ##############################
+####################################################
+
+files <- sort(list.files(paste0(plink_path) , pattern = "combi"))
+tempdf <- data.frame(fread(paste0(plink_path,files[1])) %>% select(id = IID))
+for (i in files) {
+  dt <- fread(paste0(plink_path,i))
+  dt <- select(dt, id = IID, SCORESUM) 
+  dt[[str_remove_all(i, "combi_|lupmed|.profile")]] <- dt $ SCORESUM 
+  dt $SCORESUM <- NULL
+  tempdf <- merge(tempdf, dt)
+  rm(dt, i)
+}
+new_grs_combi_PLINK_clumped_2023 <- tempdf 
+rm(files, tempdf)
+
+load(paste0(USA_path, "01-combi-dod-aim2-gx-30jan23.rdat"))
+usa <- d %>% ungroup() %>% mutate_if(is.matrix, as.numeric)
+rm(d)
+
+new_grs_usa_SbayseR <- fread(paste0(Canada_USA_SBayseR_path, "final.USA_2023_no_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_no_MHC = SCORESUM)
+
+new_grs_usa_SbayseR_MHC <- fread(paste0(Canada_USA_SBayseR_path, "final.USA_2023_with_MHC.score.profile")) %>% 
+  select(id = IID, SbayseR_with_MHC = SCORESUM)
+
+new_grs_usa_SbayseR_banded <- fread(paste0(Canada_USA_SBayseR_path, "final.USA_2023_banded.score.profile")) %>% 
+  select(id = IID, SbayseR_banded = SCORESUM)
+
+dt_grs_usa <- select(usa, id = Specimen_ID,matches("z_mdd"), PC1_3sd:PC5_3sd) %>% ungroup() %>% na.omit(.) %>% 
+    merge(. , new_grs_usa_SbayseR_banded, by = "id", all.x = T, all.y = F) %>% 
+    merge(. , new_grs_usa_SbayseR, by = "id", all.x = T, all.y = F) %>% 
+    merge(. , new_grs_usa_SbayseR_MHC, by = "id", all.x = T, all.y = F) %>% 
+    merge(. , new_grs_combi_PLINK_clumped_2023, by = "id", all.x = T, all.y = F) %>% 
+  mutate(Group = "USA") %>% na.omit(.) %>% filter(!duplicated(id))
+
+####################################################################################################
+################################## all  Cohorts    #################################################
+####################################################################################################
+dt_grs <- bind_rows(dt_grs_canada , dt_grs_usa, dt_grs_omni, dt_grs_gsa)
+
+dt_canada <-  fread(paste0(Gen_data_path, "Canadian_data.txt")) %>% mutate(id = as.character(id))
+dt_usa <-  fread(paste0(Gen_data_path, "USA_data.txt"))
+dt_sweden <- fread(paste0(Sweden_gen_data_path,"Sweden_data.txt")) %>% rename(id = BCID)
+
+dt_canada <- merge(dt_canada, dt_grs_canada, by = "id", all.x = F, all.y = F)
+dt_usa <- merge(dt_usa, dt_grs_usa, by = "id", all.x = F, all.y = F)
+dt_sweden_omni <- merge(dt_sweden, dt_grs_omni, by = "id", all.x = F, all.y = F)
+dt_sweden_gsa <- merge(dt_sweden, dt_grs_gsa, by = "id", all.x = F, all.y = F)
+
+fwrite(dt_canada , paste0(Gen_data_path, "Canadian_data.txt"), col.names = T)
+fwrite(dt_usa , paste0(Gen_data_path, "USA_data.txt"), col.names = T)
+fwrite(dt_sweden_gsa , paste0(Sweden_gen_data_path, "Sweden_gsa_data.txt"), col.names = T)
+fwrite(dt_sweden_omni , paste0(Sweden_gen_data_path,"Sweden_omni_data.txt"), col.names = T)
+
+```
+
+## Table One
+```{r, error=T, message=FALSE, warning=FALSE, comment="", results='asis', fig.align='center', dpi=600, fig.asp=0.8, fig.height=20, fig.width=12}
+rm(list = ls())
+gc()
+
+dt_canada <- fread(paste0(Gen_data_path, "Canadian_data.txt")) %>% 
+  mutate(id = as.character(id)) %>% filter(!is.na(ageonset), !is.na(total_years_follow_up)) %>% filter(phenotype != "PPMS")
+dt_usa <- fread(paste0(Gen_data_path, "USA_data.txt"))
+dt_sweden_gsa <- fread(paste0(Sweden_gen_data_path,"Sweden_gsa_data.txt"))
+dt_sweden_omni <- fread(paste0(Sweden_gen_data_path,"Sweden_omni_data.txt"))
+
+
+dt_canada $ z_mdd_depression <- dt_canada $ SbayseR_no_MHC
+dt_usa $ z_mdd_depression <- dt_usa $ SbayseR_no_MHC
+dt_sweden_gsa $ z_mdd_depression <- dt_sweden_gsa $ SbayseR_no_MHC
+dt_sweden_omni $ z_mdd_depression <- dt_sweden_omni $ SbayseR_no_MHC
+
+
+dt_canada <- dt_canada  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_usa <- dt_usa  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_gsa <- dt_sweden_gsa  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_omni <- dt_sweden_omni  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+dt <- bind_rows(dt_canada, dt_usa, dt_sweden_gsa, dt_sweden_omni)
+
+dt $ ever_relapse <- as.factor(dt $ ever_relapse)
+dt <-  dt %>%  mutate(total_n_relapse_cat = ifelse(total_n_relapse == 0, "0", ifelse(total_n_relapse %in% c(1, 2), "1-2", ">2")))
+
+dt <- dt %>% mutate(smoking = ifelse(smoking == "", NA, smoking)) %>% 
+  mutate(phenotype = ifelse(phenotype == "", NA, phenotype))
+
+mycontrols  <- tableby.control(test=F, total=F,
+                               numeric.stats=c("Nmiss", "meansd" , "medianq1q3", "range"),
+                               cat.stats=c("Nmiss", "countpct"))
+
+table1::label(dt $sex) <- "Sex"
+table1::label(dt $age_baseline) <- "Age at Baseline"
+table1::label(dt $ageonset) <- "Age at MS onset"
+table1::label(dt $agediagnosis) <- "Age at MS diagnosis"
+table1::label(dt $depression) <- "Ever had depression"
+table1::label(dt $smoking) <- "Ever Smoked"
+table1::label(dt $BMI) <- "BMI at baseline"
+table1::label(dt $year_onset) <- "Calendar year of MS onset"
+table1::label(dt $phenotype) <- "MS subtype"
+table1::label(dt $total_years_follow_up) <- "Total years of follow-up"
+table1::label(dt $ARR) <- "Annualised relapse rate"
+table1::label(dt $ever_relapse) <- "Ever had a relapse"
+table1::label(dt $total_n_relapse_cat) <- "Number of relapses"
+table1::label(dt $ever_treated) <- "Ever had DMT"
+table1::label(dt $ever_treated_platform) <- "Ever had Platform DMTs"
+table1::label(dt $ever_treated_oral) <- "Ever had Oral DMTs"
+table1::label(dt $ever_treated_mono) <- "Ever had monocloncd als"
+table1::label(dt $z_mdd_depression_cat_2) <- "Depression PRS (SBayseR method)"
+
+
+tab <- tableby(Group ~ sex + 
+                 ageonset +
+                 agediagnosis +
+                 age_baseline +
+                 year_onset +
+                 depression +
+                 z_mdd_depression_cat_2 +
+                 smoking +
+                 BMI +
+                 phenotype +
+                 total_years_follow_up +
+                 ever_relapse +
+                 total_n_relapse_cat +
+                 ever_treated + ever_treated_platform + ever_treated_oral + ever_treated_mono, dt, control = mycontrols, digits = 2)
+summary(tab) 
+
+write2word(tab, paste0( fig_table_path, "Table One.doc"), 
+           title="Table 1: General demographic and clinical characteristics of the study population")
+
+mycontrols  <- tableby.control(test=T, total=T,
+                               numeric.stats=c("Nmiss", "meansd" , "medianq1q3", "range"),
+                               cat.stats=c("Nmiss", "countpct"))
+
+tab <- tableby(z_mdd_depression_cat_2 ~ ever_relapse +
+                 total_n_relapse_cat +
+                 ARR , dt %>% filter(Group == "Canada"), control = mycontrols, digits = 2)
+write2word(tab, paste0( fig_table_path, "Table 2_relapse_canada.doc"), title="Table Relapse Canada")
+
+tab <- tableby(z_mdd_depression_cat_2 ~ ever_relapse +
+                 total_n_relapse_cat +
+                 ARR , dt %>% filter(Group == "USA"), control = mycontrols, digits = 2)
+write2word(tab, paste0( fig_table_path, "Table 2_relapse_usa.doc"), title="Table Relapse USA")
+
+tab <- tableby(z_mdd_depression_cat_2 ~ ever_relapse +
+                 total_n_relapse_cat +
+                 ARR , dt %>% filter(Group == "Sweden_Omni"), control = mycontrols, digits = 2)
+write2word(tab, paste0( fig_table_path, "Table 2_relapse_Omni.doc"), title="Table Relapse Omni")
+
+tab <- tableby(z_mdd_depression_cat_2 ~ ever_relapse +
+                 total_n_relapse_cat +
+                 ARR , dt %>% filter(Group == "Sweden_GSA"), control = mycontrols, digits = 2)
+write2word(tab, paste0( fig_table_path, "Table 2_relapse_GSA.doc"), title="Table Relapse GSA")
+
+
+```
+
+## Analysis of incidence of relapse
+```{r, warning=F, error=FALSE, results='markup', message=FALSE, comment="", fig.align='center', dpi=600, fig.asp=0.8, fig.height=20, fig.width=12}
+
+gc()
+
+plots <- list() # Initialize an empty list to store plot grobs
+for (i in c("SbayseR_no_MHC", "SbayseR_with_MHC", "SbayseR_banded")) {
+  
+dt_canada <- fread(paste0(Gen_data_path , "Canadian_data.txt")) %>% 
+  mutate(id = as.character(id)) %>% 
+  filter(!is.na(ageonset), !is.na(total_years_follow_up)) %>% 
+  mutate(total_years_follow_up = ifelse(total_years_follow_up==0, 0.1, total_years_follow_up))
+
+dt_usa <- fread(paste0(Gen_data_path ,"USA_data.txt"))
+dt_sweden_gsa <- fread(paste0(Sweden_gen_data_path ,"Sweden_gsa_data.txt"))
+dt_sweden_omni <- fread(paste0(Sweden_gen_data_path ,"Sweden_omni_data.txt"))
+
+
+dt_canada $ z_mdd_depression <- dt_canada[[i]]
+dt_usa $ z_mdd_depression <- dt_usa[[i]]
+dt_sweden_gsa $ z_mdd_depression <- dt_sweden_gsa[[i]]
+dt_sweden_omni $ z_mdd_depression <- dt_sweden_omni[[i]]
+
+
+dt_canada <- dt_canada  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_usa <- dt_usa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_gsa <- dt_sweden_gsa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_omni <- dt_sweden_omni  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+       
+dt <- bind_rows(dt_canada, dt_usa, dt_sweden_omni, dt_sweden_gsa)
+
+dt $ ever_relapse <- as.factor(dt $ ever_relapse)
+
+dt_relapse_analysis <- filter(dt, phenotype != "PPMS")
+dt_relapse_analysis_all <- dt 
+
+dt_relapse_analysis $ ARR <- ifelse(is.na(dt_relapse_analysis $ ARR), 0, dt_relapse_analysis $ ARR)
+dt_relapse_analysis $ total_n_relapse <- as.numeric(dt_relapse_analysis $ total_n_relapse)
+
+################################# Negative binomial 
+fit_multi_canada <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up))  , 
+                                  data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+fit_multi_usa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                   sex+ age_baseline + offset(log(total_years_follow_up)),  
+                   data = dt_relapse_analysis %>% filter(Group == "USA")))
+
+fit_multi_gsa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated + offset(log(total_years_follow_up)) , data = dt_relapse_analysis %>% filter(Group == "Sweden_GSA")))
+
+fit_multi_omni <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated  + offset(log(total_years_follow_up)), data = dt_relapse_analysis %>% filter(Group == "Sweden_Omni")))
+
+################################## Meta analysis
+# Create a data frame containing the effect sizes and standard errors from each study
+study <- c("Canada", "USA", "Sweden GSA", "Sweden Homni")  # Names of the cohorts
+coefs <- c(coefficients(fit_multi_canada)[2], 
+           coefficients(fit_multi_usa)[2], 
+           coefficients(fit_multi_gsa)[2],
+           coefficients(fit_multi_omni)[2])  # Effect sizes
+se <- c((summary(fit_multi_canada))$coefficients[2,2] , 
+        (summary(fit_multi_usa))$coefficients[2,2],
+       (summary(fit_multi_gsa))$coefficients[2,2] , 
+       (summary(fit_multi_omni))$coefficients[2,2])  # Standard errors
+
+data <- data.frame(study, coefs, se)
+
+library(meta)
+  m.gen <- metagen(TE = coefs,
+                 seTE = se,
+                 studlab = study,
+                 data = data,
+                 sm = "IRR",
+                 fixed = FALSE,
+                 random = TRUE,
+                 method.tau = "REML",
+                 hakn = F)
+  meta::forest.meta(m.gen, layout = "JAMA")
+  plot_grob <- grid.grabExpr(meta::forest.meta(m.gen, layout = "JAMA"))
+
+  # Now, create a title textGrob
+  title_grob <- textGrob(i, gp=gpar(fontsize=14, font=2))
+
+  # Combine the title and the plot into a single grob
+  combined_grob <- arrangeGrob(title_grob, plot_grob, ncol=1, heights=c(0.1, 0.9))
+
+  # Store the combined grob for later use
+  plots[[i]] <- combined_grob
+}
+
+# Now arrange all your plots with titles into one page and save
+grid.newpage()
+combined_plots <- do.call(arrangeGrob, c(plots, ncol=2))
+grid.draw(combined_plots)
+
+# Save the combined plot
+ggsave(paste0(fig_table_path ,"forestplot_relapse_incidence.png"), combined_plots, width=30, height=20, units="cm")
+
+#####################################################
+##################################################### PLINK with clumping
+#####################################################
+plots <- list() # Initialize an empty list to store plot grobs
+
+for (i in c("c_2023.S1", "c_2023.S2", "c_2023.S3", "c_2023.S4", "c_2023.S5", "c_2023.S6" , "c_2023.S7", "c_2023.S8")) {
+  
+dt_canada <- fread(paste0(Gen_data_path ,"Canadian_data.txt")) %>% 
+  mutate(id = as.character(id)) %>% 
+  filter(!is.na(ageonset), !is.na(total_years_follow_up)) %>% 
+  mutate(total_years_follow_up = ifelse(total_years_follow_up==0, 0.1, total_years_follow_up))
+
+dt_usa <- fread(paste0(Gen_data_path ,"USA_data.txt")) 
+dt_sweden_gsa <- fread(paste0(Sweden_gen_data_path ,"Sweden_gsa_data.txt"))
+dt_sweden_omni <- fread(paste0(Sweden_gen_data_path ,"Sweden_omni_data.txt"))
+
+
+dt_canada $ z_mdd_depression <- dt_canada[[i]]
+dt_usa $ z_mdd_depression <- dt_usa[[i]]
+dt_sweden_gsa $ z_mdd_depression <- dt_sweden_gsa[[i]]
+dt_sweden_omni $ z_mdd_depression <- dt_sweden_omni[[i]]
+
+
+dt_canada <- dt_canada  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_usa <- dt_usa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_gsa <- dt_sweden_gsa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_omni <- dt_sweden_omni  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+       
+dt <- bind_rows(dt_canada, dt_usa, dt_sweden_omni, dt_sweden_gsa)
+
+dt $ ever_relapse <- as.factor(dt $ ever_relapse)
+
+dt_relapse_analysis <- filter(dt, phenotype != "PPMS")
+dt_relapse_analysis_all <- dt 
+
+dt_relapse_analysis $ ARR <- ifelse(is.na(dt_relapse_analysis $ ARR), 0, dt_relapse_analysis $ ARR)
+dt_relapse_analysis $ total_n_relapse <- as.numeric(dt_relapse_analysis $ total_n_relapse)
+
+################################# Negative binomial 
+fit_multi_canada <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up))  , 
+                                  data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+fit_multi_usa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                   sex+ age_baseline + offset(log(total_years_follow_up)),  
+                   data = dt_relapse_analysis %>% filter(Group == "USA")))
+
+fit_multi_gsa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated + offset(log(total_years_follow_up)) , data = dt_relapse_analysis %>% filter(Group == "Sweden_GSA")))
+
+fit_multi_omni <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated  + offset(log(total_years_follow_up)), data = dt_relapse_analysis %>% filter(Group == "Sweden_Omni")))
+
+################################## Meta analysis
+# Create a data frame containing the effect sizes and standard errors from each study
+study <- c("Canada", "USA", "Sweden GSA", "Sweden Homni")  # Names of the cohorts
+coefs <- c(coefficients(fit_multi_canada)[2], 
+           coefficients(fit_multi_usa)[2], 
+           coefficients(fit_multi_gsa)[2],
+           coefficients(fit_multi_omni)[2])  # Effect sizes
+se <- c((summary(fit_multi_canada))$coefficients[2,2] , 
+        (summary(fit_multi_usa))$coefficients[2,2],
+       (summary(fit_multi_gsa))$coefficients[2,2] , 
+       (summary(fit_multi_omni))$coefficients[2,2])  # Standard errors
+
+data <- data.frame(study, coefs, se)
+
+library(meta)
+  m.gen <- metagen(TE = coefs,
+                 seTE = se,
+                 studlab = study,
+                 data = data,
+                 sm = "IRR",
+                 fixed = F,
+                 random = TRUE,
+                 method.tau = "REML",
+                 hakn = F)
+  meta::forest.meta(m.gen, plotwidth = "5cm" , leftcols = c("studlab"), leftlabs = c("Cohort") , rightcols = c("effect.ci") , layout = "JAMA") 
+  plot_grob <- grid.grabExpr(meta::forest.meta(m.gen, layout = "JAMA"))
+
+  # Now, create a title textGrob
+  title_grob <- textGrob(i, gp=gpar(fontsize=14, font=2))
+
+  # Combine the title and the plot into a single grob
+  combined_grob <- arrangeGrob(title_grob, plot_grob, ncol=1, heights=c(0.1, 0.9))
+
+  # Store the combined grob for later use
+  plots[[i]] <- combined_grob
+}
+
+grid.newpage()
+combined_plots <- do.call(arrangeGrob, c(plots, ncol=2))
+grid.draw(combined_plots)
+
+# Save the combined plot
+ggsave(paste0(fig_table_path ,"forestplot_plink_relapse_incidence.png"), combined_plots, width=35, height=25, units="cm")
+
+######################################################
+###################################################### Final model
+######################################################
+rm(list = ls())
+gc()
+
+dt_canada <- fread(paste0(Gen_data_path ,"Canadian_data.txt")) %>% 
+  mutate(id = as.character(id)) %>% 
+  filter(!is.na(ageonset), !is.na(total_years_follow_up)) %>% 
+  mutate(total_years_follow_up = ifelse(total_years_follow_up==0, 0.1, total_years_follow_up))
+
+dt_usa <- fread(paste0(Gen_data_path ,"USA_data.txt"))
+dt_sweden_gsa <- fread(paste0(Sweden_gen_data_path ,"Sweden_gsa_data.txt"))
+dt_sweden_omni <- fread(paste0(Sweden_gen_data_path ,"Sweden_omni_data.txt")) 
+
+
+dt_canada $ z_mdd_depression <- dt_canada $ SbayseR_no_MHC
+dt_usa $ z_mdd_depression <- dt_usa $ SbayseR_no_MHC
+dt_sweden_gsa $ z_mdd_depression <- dt_sweden_gsa $ SbayseR_no_MHC
+dt_sweden_omni $ z_mdd_depression <- dt_sweden_omni $ SbayseR_no_MHC
+
+
+dt_canada <- dt_canada  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_usa <- dt_usa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_gsa <- dt_sweden_gsa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+dt_sweden_omni <- dt_sweden_omni  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+       
+dt <- bind_rows(dt_canada, dt_usa, dt_sweden_omni, dt_sweden_gsa)
+
+dt $ ever_relapse <- as.factor(dt $ ever_relapse)
+
+dt_relapse_analysis <- filter(dt, phenotype != "PPMS")
+dt_relapse_analysis_all <- dt 
+
+dt_relapse_analysis $ total_n_relapse <- as.numeric(dt_relapse_analysis $ total_n_relapse)
+
+################################# Negative binomial 
+fit_multi_canada <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up))  , 
+                                  data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+fit_multi_usa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + 
+                   sex+ age_baseline + offset(log(total_years_follow_up)),  
+                   data = dt_relapse_analysis %>% filter(Group == "USA")))
+
+fit_multi_gsa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated + offset(log(total_years_follow_up)) , data = dt_relapse_analysis %>% filter(Group == "Sweden_GSA")))
+
+fit_multi_omni <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + PC1 + PC2 + PC3 + PC4 + PC5 + 
+                   sex + age_baseline + ever_treated  + offset(log(total_years_follow_up)), data = dt_relapse_analysis %>% filter(Group == "Sweden_Omni")))
+
+
+################################## Meta analysis
+# Create a data frame containing the effect sizes and standard errors from each study
+study <- c("Canada", "USA", "Sweden GSA", "Sweden Homni")  # Names of the cohorts
+coefs <- c(coefficients(fit_multi_canada)[2], 
+           coefficients(fit_multi_usa)[2], 
+           coefficients(fit_multi_gsa)[2],
+           coefficients(fit_multi_omni)[2])  # Effect sizes
+se <- c((summary(fit_multi_canada))$coefficients[2,2] , 
+        (summary(fit_multi_usa))$coefficients[2,2],
+       (summary(fit_multi_gsa))$coefficients[2,2] , 
+       (summary(fit_multi_omni))$coefficients[2,2])  # Standard errors
+
+data <- data.frame(study, coefs, se)
+
+library(meta)
+m.gen <- metagen(TE = coefs,
+                 seTE = se,
+                 studlab = study,
+                 data = data,
+                 sm = "IRR",
+                 fixed = F,
+                 random = TRUE,
+                 method.tau = "REML",
+                 hakn = F)
+summary(m.gen)
+meta::forest.meta(m.gen, plotwidth = "5cm" , leftcols = c("studlab"), leftlabs = c("Cohort") , rightcols = c("effect.ci")) 
+
+#############################################################
+##### Continuous PRS ########################################
+fit_multi_cont_canada <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Canada")))
+fit_multi_cont_gsa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression + PC1 + PC2 + PC3 + PC4 + PC5  +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Sweden_GSA")))
+fit_multi_cont_omni <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression + PC1 + PC2 + PC3 + PC4 + PC5  +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Sweden_Omni")))
+fit_multi_cont_usa <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd  +
+                   sex + age_baseline + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "USA")))
+
+
+study <- c("Canada", "USA", "Sweden GSA", "Sweden Homni")  # Names of the cohorts
+coefs <- c(coefficients(fit_multi_cont_canada)[2], 
+           coefficients(fit_multi_cont_usa)[2], 
+           coefficients(fit_multi_cont_gsa)[2],
+           coefficients(fit_multi_cont_omni)[2])  # Effect sizes
+se <- c((summary(fit_multi_cont_canada))$coefficients[2,2] , 
+        (summary(fit_multi_cont_usa))$coefficients[2,2],
+       (summary(fit_multi_cont_gsa))$coefficients[2,2] , 
+       (summary(fit_multi_cont_omni))$coefficients[2,2])  # Standard errors
+
+data <- data.frame(study, coefs, se)
+
+m.gen <- metagen(TE = coefs,
+                 seTE = se,
+                 studlab = study,
+                 data = data,
+                 sm = "RR",
+                 fixed = F,
+                 random = TRUE,
+                 method.tau = "REML",
+                 hakn = F)
+summary(m.gen)
+meta::forest.meta(m.gen, plotwidth = "5cm" , leftcols = c("studlab"), leftlabs = c("Cohort") , rightcols = c("effect.ci")) 
+
+
+#######################
+####################### Does the depression PRS predict depression phenotype?
+
+jtools::summ(glm(ifelse(demo_depression=="No", 0 , 1) ~ z_mdd_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd , dt_relapse_analysis, family = "binomial"), exp = T)
+
+jtools::summ(glm(ifelse(phq_above10=="No", 0 , 1) ~ z_mdd_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd , dt_relapse_analysis, family = "binomial"), exp = T)
+
+jtools::summ(glm(ifelse(scid_ever_dep=="No", 0 , 1) ~ z_mdd_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd , dt_relapse_analysis, family = "binomial"), exp = T)
+
+
+###################### Models adjusted for depression
+###################### 
+
+fit_multi_cont_canada_dep <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + demo_depression + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+sjPlot::tab_model(fit_multi_cont_canada_dep, digits = 2)
+
+
+fit_multi_cont_canada_dep_s <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + scid_ever_dep + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+sjPlot::tab_model(fit_multi_cont_canada_dep_s, digits = 2)
+
+fit_multi_cont_canada_dep_p <-(MASS::glm.nb(total_n_relapse ~ z_mdd_depression_cat_2 + phq_above10 + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd +
+                   sex+ age_baseline + ever_treated + offset(log(total_years_follow_up)) , 
+                   data = dt_relapse_analysis %>% filter(Group == "Canada")))
+
+sjPlot::tab_model(fit_multi_cont_canada_dep_p, digits = 2)
+
+table(dt_relapse_analysis$phq_above10)
+
+
+
+```
+
+## Time to first relapse analysis (PDE)
+```{r, results='asis', error=TRUE}
+
+gc()
+
+dt <- fread(paste0(Gen_data_path, "USA_data.txt"))
+
+dt $ z_mdd_depression <- dt $SbayseR_no_MHC
+dt <- dt  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+
+dt_base <- haven::read_sas(paste0(USA_path, "kaarina_combi.sas7bdat"), NULL) %>%
+  filter(!is.na(visit)) %>% 
+  rename(id = Specimen_ID) %>% 
+  select(id, arm = treat) %>% filter(!duplicated(id))
+
+dt_survival <- dt %>% filter(!duplicated(id)) %>% 
+  merge(. , dt_base, by = "id", all.x = T, all.y = F) %>% 
+  select(id, sex, arm, z_mdd_depression, z_mdd_depression_cat_2, PC1_3sd:PC5_3sd, age_baseline , depression,
+         matches("ever|time"))  %>% 
+  mutate(ever_relapse_1 = ifelse(ever_relapse == "Yes", 1, 0)) %>% 
+  filter(arm != "")
+
+
+###############
+###############
+# Create a survival object
+dt_survival <- dt_survival  %>% mutate(decile = as.numeric(cut(z_mdd_depression, quantile(z_mdd_depression, probs = seq(0, 1, 0.1)))))
+
+
+## KM stratified by median GRS score 
+relapse <- survfit2(Surv(time_to_first_pde, as.factor(ever_pde)) ~ z_mdd_depression_cat_2,  data = dt_survival %>% na.omit()) %>%
+  ggcuminc( linetype_aes = T , size = 0.8) +
+  labs(
+    x = "",
+    y = "Probability of PDE",
+      title = "A"
+  ) + theme_classic()+
+  theme(legend.position = c(0.2,0.9)) +
+  add_confidence_interval()+
+  scale_y_continuous( limits = c(0,1) ) +
+  scale_x_continuous(breaks = c(365.2, 365.2*2, 365.2*3, 365.2*4, 365.2*5, 365.2*6),
+                     labels = c("12 Month","24 Month","36 Month","48 Month","60 Month","72 Month")) +
+  scale_color_grey() +
+  scale_fill_grey() +
+     add_risktable(size = 5,
+                   risktable_stats = "{n.risk} ({n.event})",
+                   theme = theme_risktable_default(axis.text.y.size = 14,
+                                                   plot.title.size = 15)) +
+     theme(axis.title = element_text(size = 20),
+           axis.text = element_text(size = 15),
+           legend.text = element_text(size = 15),
+           axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))
+
+relapse
+
+dt_survival <- dt_survival %>% mutate(time_to_first_pde_m = round(time_to_first_pde/30, 0) )
+
+d <- survfit(Surv(time_to_first_pde_m, (ever_pde)) ~ z_mdd_depression_cat_2, data = dt_survival %>% na.omit())  %>% 
+  tbl_survfit(
+    label = "Protocle defined relapse",
+    time = c(12, 24, 36, 48, 60, 72), reverse = T,
+    label_header = "**{time} Month**"
+  ) %>%   add_p()
+d
+
+################### Cox survival analysis 
+
+### Multivariate analysis
+fit_1 <- coxph(Surv(time_to_first_relapse, ever_pde) ~ z_mdd_depression_cat_2 + age_baseline 
+               + sex  + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + arm, data = dt_survival, id = id) 
+
+fit_2 <- coxph(Surv(time_to_first_relapse, ever_pde) ~ z_mdd_depression_cat_2 + depression  + age_baseline +
+               + sex  + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + arm, data = dt_survival, id = id) 
+
+fit_1 %>%
+  gtsummary::tbl_regression(exp = TRUE) %>%
+  add_glance_table(
+    include = c(r.squared, AIC)
+  )
+
+fit_2 %>%
+  gtsummary::tbl_regression(exp = TRUE) %>%
+  add_glance_table(
+    include = c(r.squared, AIC)
+  )
+
+cox.zph(fit_1)
+
+fit_1 <- coxph(Surv(time_to_first_relapse, ever_pde) ~ z_mdd_depression  + age_baseline  
+               + sex  + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + arm, data = dt_survival, id = id) 
+
+fit_2 <- coxph(Surv(time_to_first_relapse, ever_pde) ~ z_mdd_depression +  depression  + age_baseline +
+               + sex+ arm, data = dt_survival, id = id) 
+
+fit_1 %>%
+  gtsummary::tbl_regression(exp = TRUE) %>%
+  add_glance_table(
+    include = c(r.squared, AIC)
+  )
+
+fit_2 %>%
+  gtsummary::tbl_regression(exp = TRUE) %>%
+  add_glance_table(
+    include = c(r.squared, AIC)
+  )
+
+```
+
+## Time to confirm EDSS progression USA (relapse GRS)
+```{r, results='asis', eval=T, warning=FALSE, error=FALSE, comment=""}
+gc()
+
+base <- fread(paste0(Gen_data_path, "USA_data.txt")) %>% 
+  select(id, sex, matches("PC"), z_mdd_depression = SbayseR_no_MHC)
+
+dt <- haven::read_sas(paste0(USA_path, "kaarina_combi.sas7bdat")) %>% 
+  select(id = Specimen_ID, baseline_edss = bl_EDSS , baseline_age = age_b, event_time_month = num_prog ,
+         event_time_year = prog_years, event = PROG_Ever_Never, Prog_censor_1 , follow_up_time = fu_months , arm = treat) %>% 
+  mutate(event = ifelse( event == "PROG", 1, 0)) %>% 
+  mutate(time_main = ifelse(event == 1, event_time_month, ifelse(event == 0, follow_up_time, NA))) %>% 
+  select(id, baseline_age, baseline_edss, event, time_main, arm) %>% 
+  merge(. , base, by = "id", all.x = F, all.y = T) %>% 
+  filter(!duplicated(id))
+
+dt $ z_mdd_depression_cat_2 <- as.factor(ifelse(ntile(dt $ z_mdd_depression , 10) %in% c(9,10), "Top 20%", "Bottom 80%"))
+dt_survival <- dt
+
+summary(tableby(z_mdd_depression_cat_2~. , dt_survival %>% select(-id, - matches("PC")) %>% mutate(event = ifelse(event ==1, "Yes", "No"))))
+
+#### Overall KM showing the probability of relapse
+survfit2(Surv(time_main, as.factor(event)) ~ 1, data = dt_survival) %>% 
+  ggcuminc() +
+  labs(
+    x = "Month",
+    y = "Progression probability"
+  ) + theme_classic()+ 
+  add_confidence_interval()+ 
+  scale_y_continuous( limits = c(0,1) )
+
+## KM stratified by GRS score
+survfit2(Surv(time_main, as.factor(event)) ~ z_mdd_depression_cat_2, data = dt_survival %>% na.omit()) %>% 
+  ggcuminc() +
+  labs(
+    x = "Months",
+    y = "Sustained EDSS worsening probability"  ) + theme_classic()+ theme(legend.position = c(0.2,0.9)) +
+  add_confidence_interval()+ scale_y_continuous( limits = c(0,1) ) + add_risktable()
+
+survfit(Surv(time_main, event) ~ z_mdd_depression_cat_2, data = dt_survival %>% na.omit())  %>% 
+  tbl_survfit(
+    label = "Sustained EDSS worsening",
+    time = c(12, 36, 60), reverse = T
+  ) %>%   add_p()
+
+
+edss <- survfit2(Surv(time_main, as.factor(event)) ~ z_mdd_depression_cat_2, data = dt_survival %>% na.omit()) %>%
+  ggcuminc( linetype_aes = T , size = 0.8) +
+  labs(
+    x = "",
+    y = "Probability of EDSS worsening",
+      title = "B"
+  ) + theme_classic()+
+  theme(legend.position = c(0.2,0.9)) +
+  add_confidence_interval()+
+  scale_y_continuous( limits = c(0,1) ) +
+  scale_x_continuous(breaks = c(12, 24, 36, 48, 60, 72),
+                     labels = c("12 Month","24 Month","36 Month","48 Month","60 Month","72 Month")) +
+  scale_color_grey() +
+  scale_fill_grey() +
+     add_risktable(size = 5,
+                   risktable_stats = "{n.risk} ({n.event})",
+                   theme = theme_risktable_default(axis.text.y.size = 14,
+                                                   plot.title.size = 15)) +
+     theme(axis.title = element_text(size = 20),
+           axis.text = element_text(size = 15),
+           legend.text = element_text(size = 15),
+           axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))
+
+wrap_plots( ggsurvfit_build(relapse) , ggsurvfit_build(edss) , nrow = 1)
+
+ggsave(paste0(fig_table_path, "KM_graphs.jpeg"),
+       units = "cm", height = 15, width = 30, scale = 1.3)
+
+################### Cox survival analysis 
+
+### Univariate
+coxph(Surv(time_main, as.factor(event)) ~ z_mdd_depression_cat_2, data = dt_survival, id = id) %>% 
+  gtsummary::tbl_regression(exp = TRUE) 
+
+### Multivariate analysis
+coxph(Surv(time_main, as.factor(event)) ~ z_mdd_depression_cat_2 + sex  + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + baseline_edss + baseline_age + arm, data = dt_survival, id = id) %>% 
+  gtsummary::tbl_regression(exp = TRUE) 
+
+
+####-------
+### Univariate
+coxph(Surv(time_main, as.factor(event)) ~ z_mdd_depression, data = dt_survival, id = id) %>% 
+  gtsummary::tbl_regression(exp = TRUE) 
+
+### Multivariate analysis
+coxph(Surv(time_main, as.factor(event)) ~ z_mdd_depression + sex  + PC1_3sd + PC2_3sd + PC3_3sd + PC4_3sd + PC5_3sd + arm + baseline_edss + baseline_age, data = dt_survival, id = id) %>% 
+  gtsummary::tbl_regression(exp = TRUE) 
+
+
+```
+
+### Association between the GRS and EDSS based outcomes
+```{r, warning=F, results= 'asis', message=FALSE, comment="", eval=T}
+gc()
+
+#######################################################
+################### Sweden   ##########################
+#######################################################
+edss <- read_excel(paste0(Sweden_path, "MS2021.xlsx"), sheet = "EDSS") %>% 
+  select(id = BCID, edss, gARMSS, uGMSSS, date_edss) %>% mutate(date_edss = as.Date(date_edss))
+
+dt_sweden_gsa <- fread(paste0(Sweden_gen_data_path, "Sweden_gsa_data.txt")) %>% filter(!duplicated(id))
+dt_sweden_omni <- fread(paste0(Sweden_gen_data_path, "Sweden_omni_data.txt"))
+
+dt_sweden_gsa $ z_mdd_depression <- dt_sweden_gsa$SbayseR_no_MHC
+dt_sweden_gsa <- dt_sweden_gsa  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+dt_sweden_omni $ z_mdd_depression <- dt_sweden_omni $ SbayseR_no_MHC
+dt_sweden_omni <- dt_sweden_omni  %>%  
+  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+########### Calculating ARMSS and MSSS
+dt_edss_gsa <- edss %>% 
+  group_by(id) %>%
+  arrange(id, date_edss) %>%
+  mutate(seq_edss = 1:length(id), max_edss = n()) %>%
+  mutate(time_days = date_edss - lag(date_edss)) %>%
+  mutate(time_days = ifelse(seq_edss == 1, 0, time_days)) %>%
+  mutate(time_days = cumsum(time_days)) %>%
+  mutate(time_years = round(time_days/365.25, 0)) %>%
+  filter(time_years <= 365.25*5 ) %>% 
+  merge(. , dt_sweden_gsa, by = "id", all.x = F, all.y = T) %>%
+  mutate(ageatedss = round(lubridate::year(date_edss) - (lubridate::year(date_onset)) + (ageonset) )) %>%
+  mutate(dd = ageatedss - ageonset) %>% 
+  arrange(id, date_edss) %>% 
+  ungroup() %>% filter(seq_edss >= seq) %>% select(-seq, -seq_edss, -max_edss)
+
+length(unique(dt_edss_gsa$id))
+
+
+### Omni
+########### Calculating ARMSS and MSSS
+dt_edss_omni <- edss %>% 
+  group_by(id) %>%
+  arrange(id, date_edss) %>%
+  mutate(seq_edss = 1:length(id), max_edss = n()) %>%
+  mutate(time_days = date_edss - lag(date_edss)) %>%
+  mutate(time_days = ifelse(seq_edss == 1, 0, time_days)) %>%
+  mutate(time_days = cumsum(time_days)) %>%
+  mutate(time_years = round(time_days/365.25, 0)) %>%
+  filter(time_years <= 365.25*5 ) %>% 
+  merge(. , dt_sweden_omni, by = "id", all.x = F, all.y = T) %>%
+  mutate(ageatedss = round(lubridate::year(date_edss) - (lubridate::year(date_onset)) + (ageonset) )) %>%
+  mutate(dd = ageatedss - ageonset) %>% 
+  mutate(dd = ifelse(dd < 0 , 1, dd)) %>% 
+  arrange(id, date_edss) %>% 
+  ungroup() %>% filter(seq_edss >= seq) %>% select(-seq, -seq_edss, -max_edss)
+
+length(unique(dt_edss_omni$id))
+
+#######################################################
+################### Canada   ##########################
+#######################################################
+
+load(paste0(Canada_path, "00-imid-dod-aim2-3nov22.rdat"))
+ms_perind <- ms_perind %>% ungroup() %>% mutate_if(is.matrix, as.numeric)
+
+dt_canada <- fread(paste0(Gen_data_path, "Canadian_data.txt")) %>% 
+  mutate(id = as.character(id)) %>% filter(!is.na(ageonset), !is.na(total_years_follow_up)) %>% 
+  filter(phenotype != "PPMS")
+
+dt_canada $ z_mdd_depression <- dt_canada $ SbayseR_no_MHC
+dt_canada <- dt_canada  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+########### Calculating ARMSS and MSSS
+dt_edss <- ms_long %>% select(id = demo_studyid, demo_dob, matches("edss|date"))  %>%
+  group_by(id) %>%
+  arrange(id, ms_edss_date) %>%
+  mutate(seq = 1:length(id), max = n()) %>%
+  mutate(time_days = ms_edss_date - lag(ms_edss_date)) %>%
+  mutate(time_days = ifelse(seq == 1, 0, time_days)) %>%
+  mutate(time_days = cumsum(time_days)) %>%
+  mutate(time_years = round(time_days/365.25, 0)) %>%
+  merge(. , dt_canada, by = "id", all.x = F, all.y = T) %>%
+  mutate(ageatedss = lubridate::year(ms_edss_date) - lubridate::year(demo_dob)) %>%
+  mutate(dd = ageatedss - ageonset) %>%
+  rename(edss = ms_edss, edss_date = ms_edss_date) %>%
+  ungroup() 
+
+out <- ms_sev(dt_edss) ## gARMSS
+dt_edss <- out$data
+
+out <- ms_sev(dt_edss, type = "global_msss") ## gMSSS
+dt_edss_canada <- out$data
+
+length(unique(dt_edss_canada$id))
+
+dt_edss_canada <- dt_edss_canada %>% 
+  select( id, edss_date, edss, gARMSS, uGMSSS, ageatedss, dd) %>% 
+  merge(. , dt_canada, by = "id", all.x = F, all.y = T)
+
+#######################################################
+###################   USA    ##########################
+#######################################################
+rm(list =(setdiff(ls(), c("dt_edss_canada", "dt_edss_gsa", "dt_edss_omni"))))
+
+dt_main_usa <- fread(paste0(Gen_data_path, "USA_data.txt")) 
+
+dt_main_usa $ z_mdd_depression <- dt_main_usa $ SbayseR_no_MHC
+dt_main_usa <- dt_main_usa  %>%  mutate(z_mdd_depression_cat_2 = as.factor(ifelse(z_mdd_depression >= quantile(z_mdd_depression, 0.8) , "Top 20%", "Bottom 80%")))
+
+base <- haven::read_sas(paste0(USA_path, "kaarina_combi.sas7bdat"), 
+    NULL) %>% select(id = Specimen_ID, baseline_date = F01DTVIS, age_b, year_onset = symp) %>% filter(!duplicated(id))
+
+# Create mode function. (for similar ages which ARMSS cannot be calculated, we take the EDSS mode for that age)
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+dt_usa  <- haven::read_sas(paste0(USA_path, "kaarina_edss.sas7bdat"), 
+    NULL) %>% 
+  select(id = Specimen_ID, edss = edss1, time_overall = m, time_unique = Days_bl_diff) %>% 
+  merge(. , base , by = "id", all.x = T, all.y = F) %>% 
+  mutate(edss_date = baseline_date + time_unique) %>% 
+  mutate(dd = lubridate::year(edss_date) - year_onset) %>% 
+  mutate(ageatedss = floor(age_b + (time_unique)/365.2)) 
+
+out <- ms_sev(dt_usa) ## gARMSS
+dt_edss <- out$data
+
+out <- ms_sev(dt_edss, type = "global_msss") ## gMSSS
+dt_edss_usa <- out$data
+
+dt_edss_usa <- dt_edss_usa %>% 
+  select( id, edss_date, edss, gARMSS, uGMSSS, ageatedss, dd) %>% 
+  merge(. , dt_main_usa, by = "id", all.x = F, all.y = T) 
+
+dt_edss_all <- rbind(dt_edss_usa %>% 
+                       select(id, edss_date, edss, gARMSS, uGMSSS, sex, ageonset, z_mdd_depression, z_mdd_depression_cat_2,
+                              Group, matches("PC"), ever_treated,ageatedss, dd) %>% 
+                       rename(PC1 = PC1_3sd, PC2 = PC2_3sd, PC3 = PC3_3sd, PC4 = PC4_3sd, PC5 = PC5_3sd,), 
+                     dt_edss_canada %>% 
+                       select(id, edss_date, edss, gARMSS, uGMSSS, sex, ageonset, z_mdd_depression, z_mdd_depression_cat_2,
+                              Group, matches("PC"), ever_treated, ageatedss, dd) %>% 
+                       rename(PC1 = PC1_3sd, PC2 = PC2_3sd, PC3 = PC3_3sd, PC4 = PC4_3sd, PC5 = PC5_3sd,),
+                     dt_edss_gsa %>% select(id, edss_date = date_edss, edss, gARMSS, uGMSSS, sex, ageonset, z_mdd_depression, z_mdd_depression_cat_2,
+                              Group, matches("PC"), ever_treated, ageatedss, dd),
+                     dt_edss_omni %>% select(id, edss_date = date_edss, edss, gARMSS, uGMSSS, sex, ageonset, z_mdd_depression, z_mdd_depression_cat_2,
+                              Group, matches("PC"), ever_treated, ageatedss, dd))
+
+rm(list =(setdiff(ls(), "dt_edss_all")))
+
+##### Baseline EDSS score
+##### 
+dt_edss_all <- dt_edss_all %>% 
+  group_by(id) %>% 
+  arrange(id, edss_date) %>% 
+  mutate(seq = 1:length(id) , max = n()) %>% 
+  mutate(base_edss = ifelse(seq == 1, edss, NA),
+         base_garmss = ifelse(seq== 1, gARMSS, NA),
+         base_gmsss = ifelse(seq == 1, uGMSSS, NA)) %>% 
+  fill(base_edss, .direction = "updown") %>% 
+  fill(base_garmss, .direction = "updown") %>% 
+  fill(base_gmsss, .direction = "updown") %>% 
+    mutate(last_edss = ifelse(seq == max, edss, NA),
+         last_garmss = ifelse(seq== max, gARMSS, NA),
+         last_gmsss = ifelse(seq == max, uGMSSS, NA)) %>% 
+  fill(last_edss, .direction = "updown") %>% 
+  fill(last_garmss, .direction = "updown") %>% 
+  fill(last_gmsss, .direction = "updown") 
+
+table1::label(dt_edss_all$base_edss) <- "Baseline EDSS"
+table1::label(dt_edss_all$base_garmss) <- "Baseline Global ARMSS Score"
+table1::label(dt_edss_all$base_gmsss) <- "Baseline Global MSSS Score"
+table1::label(dt_edss_all$last_edss) <- "Final EDSS"
+table1::label(dt_edss_all$last_garmss) <- "Final Global ARMSS Score"
+table1::label(dt_edss_all$last_gmsss) <- "Final Global MSSS Score"
+
+
+mycontrols  <- tableby.control(test=T, total=T,
+                               numeric.stats=c("Nmiss", "meansd" , "medianq1q3", "range"),
+                               cat.stats=c("Nmiss", "countpct"))
+
+tab_1 <- tableby((z_mdd_depression_cat_2)~ base_edss + last_edss +
+                   base_garmss + last_garmss +
+                   base_gmsss + last_gmsss, dt_edss_all %>% filter(!duplicated(id), Group == "Canada"),
+                 control = mycontrols, digits = 2)
+summary(tab_1)
+tab_2 <- tableby((z_mdd_depression_cat_2)~ base_edss + last_edss +  base_garmss + last_garmss +
+                   base_gmsss + last_gmsss, dt_edss_all %>% filter(!duplicated(id), Group == "USA"),
+                 control = mycontrols, digits = 2)
+summary(tab_2)
+tab_3 <- tableby((z_mdd_depression_cat_2)~ base_edss + last_edss +
+                   base_garmss + last_garmss +
+                   base_gmsss + last_gmsss, dt_edss_all %>% filter(!duplicated(id), Group == "Sweden_GSA"),
+                 control = mycontrols, digits = 2)
+summary(tab_3)
+tab_4 <- tableby((z_mdd_depression_cat_2)~ base_edss + last_edss +
+                   base_garmss + last_garmss +
+                   base_gmsss + last_gmsss, dt_edss_all %>% filter(!duplicated(id), Group == "Sweden_Omni"),
+                 control = mycontrols, digits = 2)
+summary(tab_4)
+
+write2word(tab_1, paste0(fig_table_path, "Table EDSS Canada.doc"), title = "Canada")
+write2word(tab_2, paste0(fig_table_path, "Table EDSS USA.doc"), title = "USA")
+write2word(tab_3, paste0(fig_table_path, "Table EDSS Sweden GSA.doc"), title = "Sweden GSA")
+write2word(tab_4, paste0(fig_table_path, "Table EDSS Sweden Homni.doc"), title = "Sweden Homni")
+
+
+##############################################################################
+############################################################################## LME interaction models 
+##############################################################################
+dt_edss_analysis <- dt_edss_all %>% 
+  group_by(id) %>% 
+  arrange(id, ageatedss) %>% 
+  mutate(time = 1:length(id)) %>% 
+  na.omit(.) %>% 
+  rename(ARMSS = gARMSS, MSSS = uGMSSS, EDSS = edss) %>% 
+  mutate(Group = ifelse(Group == "Sweden_Omni", "Sweden_Homni", Group))
+
+for (j in c("Canada", "USA", "Sweden_GSA", "Sweden_Homni")) {
+  for (i in c("EDSS", "ARMSS", "MSSS")) {
+    
+    # Define formula based on the outcome variable
+    if (i == "ARMSS") {
+      f <- as.formula(paste0(i, " ~ z_mdd_depression_cat_2 * dd + sex + ageonset + base_edss + PC1 + PC2 + PC3 + PC4 + PC5 + (1 | id)"))
+      assign(paste0("Model_", i, "_", j), 
+             lmer(f, 
+                  data = dt_edss_analysis %>% filter(Group == j)))
+    }
+    
+    if (i %in% c("EDSS", "MSSS")) {
+      f <- as.formula(paste0(i, " ~ z_mdd_depression_cat_2 * ageatedss + sex + ageonset + base_edss + PC1 + PC2 + PC3 + PC4 + PC5 + (1 | id)"))
+      assign(paste0("Model_", i, "_", j), 
+             lmer(f, 
+                  data = dt_edss_analysis %>% filter(Group == j)))
+    }
+    
+    # Store the model without intermediate plotting
+    model <- get(paste0("Model_", i, "_", j))
+  }
+}
+
+
+# Function to retrieve robust coefficients and p-values
+get_robust_label <- function(model, coef_index) {
+  robust_vcov <- vcovCR(model, type = "CR2")
+  robust_results <- coef_test(model, vcov = robust_vcov)
+  coef_value <- round(robust_results$beta[coef_index], 2)
+  p_value <- round(robust_results$p_Satt[coef_index], 3)
+  paste0("Coef = ", coef_value, ", P = ", p_value)
+}
+
+# Plot function for ARMSS models
+plot_fun_armss <- function(x, name) {
+  label <- get_robust_label(x, coef_index = 12)  # Adjust coef_index if needed
+  country <- str_replace_all(str_extract(name, "_[A-Za-z]+_[A-Za-z]+"), "_", " ")
+  outcome <- str_extract(name, "(EDSS|ARMSS|MSSS)")
+  a <- interact_plot(x, 
+                     pred = dd, 
+                     modx = z_mdd_depression_cat_2, 
+                     interval = TRUE, 
+                     jitter = 0.1, 
+                     robust = TRUE,
+                     point.size = 0.5,
+                     point.alpha = 0.1,
+                     plot.points = TRUE,
+                     legend.main = "PGS categories",
+                     int.type = c("confidence", "prediction"),
+                     line.thickness = 1.3,
+                     x.label = "Disease duration", 
+                     main.title = bquote(.(country)[~~~.(label)]),
+                     y.label = paste0("Predicted ", outcome, " score")) +
+       theme_minimal() +
+       theme(panel.grid.major = element_blank(),
+             plot.title = element_text(size = 8)) +
+       scale_y_continuous(limits = c(0, 10))
+}
+
+# Plot function for EDSS and MSSS models
+plot_fun <- function(x, name) {
+  label <- get_robust_label(x, coef_index = 12)  # Adjust coef_index if needed
+  country <- str_replace_all(str_extract(name, "_[A-Za-z]+_[A-Za-z]+"), "_", " ")
+  outcome <- str_extract(name, "(EDSS|ARMSS|MSSS)")
+  a <- interact_plot(x, 
+                     pred = ageatedss, 
+                     modx = z_mdd_depression_cat_2, 
+                     interval = TRUE, 
+                     jitter = 0.1, 
+                     robust = TRUE,
+                     point.size = 0.5,
+                     point.alpha = 0.1,
+                     plot.points = TRUE,
+                     legend.main = "PGS categories",
+                     int.type = c("confidence", "prediction"),
+                     line.thickness = 1.3,
+                     x.label = "Age at assessment", 
+                     main.title = bquote(.(country)[~~~.(label)]),
+                     y.label = paste0("Predicted ", outcome, " score")) +
+       theme_minimal() +
+       theme(panel.grid.major = element_blank(),
+             plot.title = element_text(size = 8)) +
+       scale_y_continuous(limits = c(0, 10))
+}
+
+# Theme adjustment for removing y-axis elements
+remove_y <- theme(
+  axis.text.y = element_blank(),
+  axis.ticks.y = element_blank(),
+  axis.title.y = element_blank()
+)
+
+# Generate plots and store in a list
+p <- list(
+  plot_fun_armss(Model_ARMSS_Canada, "Model_ARMSS_Canada"),
+  plot_fun_armss(Model_ARMSS_USA, "Model_ARMSS_USA") + remove_y,
+  plot_fun_armss(Model_ARMSS_Sweden_GSA, "Model_ARMSS_Sweden_GSA") + remove_y,
+  plot_fun_armss(Model_ARMSS_Sweden_Homni, "Model_ARMSS_Sweden_Homni") + remove_y,
+  plot_fun(Model_EDSS_Canada, "Model_EDSS_Canada"),
+  plot_fun(Model_EDSS_USA, "Model_EDSS_USA") + remove_y,
+  plot_fun(Model_EDSS_Sweden_GSA, "Model_EDSS_Sweden_GSA") + remove_y,
+  plot_fun(Model_EDSS_Sweden_Homni, "Model_EDSS_Sweden_Homni") + remove_y,
+  plot_fun(Model_MSSS_Canada, "Model_MSSS_Canada"),
+  plot_fun(Model_MSSS_USA, "Model_MSSS_USA") + remove_y,
+  plot_fun(Model_MSSS_Sweden_GSA, "Model_MSSS_Sweden_GSA") + remove_y,
+  plot_fun(Model_MSSS_Sweden_Homni, "Model_MSSS_Sweden_Homni") + remove_y
+)
+
+# Arrange plots in 3 rows with legends at the bottom
+wrap_plots(p, nrow = 3) + plot_layout(guides = "collect") & theme(legend.position = 'bottom')
+
+ggsave(paste0(fig_table_path , "EDSS_interaction_new_no_MHC.jpeg"),
+       units = "cm", height = 50, width = 60, scale = 0.6)
+
+```
+
+#### Testing LME assumptions
+```{r}
+# Specify the PDF file name
+pdf(paste0(fig_table_path, "LME_Diagnostic_Plots.pdf"), width = 8, height = 10)
+
+# Loop through each cohort and outcome variable to generate diagnostic plots
+for (j in c("Canada", "USA", "Sweden_GSA", "Sweden_Homni")) {
+  plot_list <- list()  # List to store plots for each cohort
+  
+  for (i in c("EDSS", "ARMSS", "MSSS")) {
+    
+    # Retrieve model if it exists
+    model_name <- paste0("Model_", i, "_", j)
+    model <- get(model_name, envir = .GlobalEnv, inherits = TRUE)
+    
+    if (!is.null(model)) {
+      
+      # Residual Diagnostics
+      residuals <- resid(model)
+      fitted_values <- fitted(model)
+      
+      # Residuals vs. Fitted Plot (Homoscedasticity Check)
+      p1 <- ggplot(data = data.frame(fitted_values, residuals), aes(x = fitted_values, y = residuals)) +
+        geom_point() +
+        geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+        labs(title = paste("Residuals vs Fitted:", model_name)) +
+        theme_minimal() +
+        theme(plot.title = element_text(size = 8))
+      
+      # QQ Plot of Residuals (Normality Check)
+      p2 <- ggplot(data = data.frame(sample = residuals), aes(sample = sample)) +
+        stat_qq() +
+        stat_qq_line(color = "red") +
+        labs(title = paste("QQ Plot of Residuals:", model_name)) +
+        theme_minimal() +
+        theme(plot.title = element_text(size = 8))
+      
+      # Random Effects Normality Check
+      ranef_values <- unlist(ranef(model)$id)
+      p3 <- ggplot(data = data.frame(sample = ranef_values), aes(sample = sample)) +
+        stat_qq() +
+        stat_qq_line(color = "red") +
+        labs(title = paste("QQ Plot of Random Effects:", model_name)) +
+        theme_minimal() +
+        theme(plot.title = element_text(size = 8))
+      
+      # Combine plots for this model and add to the list
+      plot_list[[model_name]] <- p1 / p2 / p3  # Stack plots vertically
+    }
+  }
+  
+  # Print all plots for this cohort to the PDF
+  if (length(plot_list) > 0) {
+    wrap_plots(plot_list, ncol = 3) %>% print()  # Arrange and print plots in 3 columns
+  }
+}
+
+# Close the PDF device
+dev.off()
+
+
+
+```
+
