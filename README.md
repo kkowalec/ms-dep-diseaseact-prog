@@ -1,2 +1,3 @@
 # ms-dep-diseaseact-prog
-Depression polygenicity and MS disease activity and progression
+R-based analyses related to project on depression polygenicity and MS disease activity and progression by A. Manouchehrinia and K. Kowalec;
+manuscript submitted.
